@@ -7,6 +7,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/players")
@@ -28,5 +29,12 @@ public class PlayerController {
     @GetMapping("/teams")
     public ResponseEntity<List<WcPlayer>> getPlayersByTeams(@RequestParam List<String> teams) {
         return ResponseEntity.ok(playerRepository.findByTeamIn(teams));
+    }
+
+    @PostMapping("/sync")
+    public ResponseEntity<Map<String, Object>> syncPlayers(@RequestBody List<WcPlayer> players) {
+        playerRepository.deleteAll();
+        playerRepository.saveAll(players);
+        return ResponseEntity.ok(Map.of("synced", players.size()));
     }
 }
