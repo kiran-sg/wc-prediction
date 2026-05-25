@@ -1,0 +1,2 @@
+FROM postgres:16
+RUN ln -sf /usr/share/zoneinfo/Asia/Kolkata /usr/share/zoneinfo/Asia/Calcutta
