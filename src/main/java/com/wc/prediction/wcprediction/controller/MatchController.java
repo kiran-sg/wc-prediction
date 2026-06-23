@@ -1,9 +1,12 @@
 package com.wc.prediction.wcprediction.controller;
 
+import com.wc.prediction.wcprediction.dto.MatchResultDto;
 import com.wc.prediction.wcprediction.entity.WcMatch;
 import com.wc.prediction.wcprediction.entity.WcTeam;
 import com.wc.prediction.wcprediction.repository.MatchRepository;
+import com.wc.prediction.wcprediction.repository.MatchResultRepository;
 import com.wc.prediction.wcprediction.repository.TeamRepository;
+import com.wc.prediction.wcprediction.response.AdminResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -20,6 +23,9 @@ public class MatchController {
 
     @Autowired
     private TeamRepository teamRepository;
+
+    @Autowired
+    private MatchResultRepository matchResultRepository;
 
     @GetMapping
     public ResponseEntity<List<Map<String, Object>>> getAllMatches() {
@@ -42,6 +48,24 @@ public class MatchController {
         }).collect(Collectors.toList());
 
         return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/result")
+    public ResponseEntity<AdminResponse> getMatchResult(@RequestParam String matchId) {
+        AdminResponse response = new AdminResponse();
+        matchResultRepository.findByMatchId(matchId).ifPresent(r -> {
+            MatchResultDto dto = new MatchResultDto();
+            dto.setMatchId(r.getMatchId());
+            dto.setMatchResult(r.getMatchResult());
+            dto.setScoreTeamA(r.getScoreTeamA());
+            dto.setScoreTeamB(r.getScoreTeamB());
+            dto.setFirstGoalscorer(r.getFirstGoalscorer());
+            dto.setWinningGoalscorer(r.getWinningGoalscorer());
+            dto.setPlayerOfMatch(r.getPlayerOfMatch());
+            response.setMatchResult(dto);
+        });
+        response.setStatus(true);
+        return ResponseEntity.ok(response);
     }
 
     @PostMapping("/sync")

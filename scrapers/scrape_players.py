@@ -33,6 +33,16 @@ TEAMS = {
 }
 
 
+def make_short_name(full_name):
+    """Generate ESPN-style short name: 'Nizar Al-Rashdan' -> 'N. Al-Rashdan'"""
+    # Strip Wikipedia disambiguators like "(footballer)"
+    name = re.sub(r'\s*\([^)]*\)', '', full_name).strip()
+    parts = name.split()
+    if len(parts) < 2:
+        return name
+    return parts[0][0] + '. ' + ' '.join(parts[1:])
+
+
 def main():
     req = urllib.request.Request(API_URL, headers={"User-Agent": "WCPredictionBot/1.0"})
     with urllib.request.urlopen(req) as resp:
@@ -127,16 +137,25 @@ def main():
         CREATE TABLE IF NOT EXISTS wc_players (
             id BIGSERIAL PRIMARY KEY,
             player_name VARCHAR(200),
+            short_name VARCHAR(100),
             team VARCHAR(100),
             position VARCHAR(10)
         )
     """)
+    # Add short_name column if table already exists without it
+    cur.execute("""
+        DO $$ BEGIN
+            ALTER TABLE wc_players ADD COLUMN short_name VARCHAR(100);
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+    """)
     cur.execute("DELETE FROM wc_players")
 
     for name, team, pos in unique_players:
+        short = make_short_name(name)
         cur.execute(
-            "INSERT INTO wc_players (player_name, team, position) VALUES (%s, %s, %s)",
-            (name, team, pos)
+            "INSERT INTO wc_players (player_name, short_name, team, position) VALUES (%s, %s, %s, %s)",
+            (name, short, team, pos)
         )
 
     conn.commit()

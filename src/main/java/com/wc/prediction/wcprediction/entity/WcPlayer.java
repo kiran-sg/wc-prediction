@@ -17,6 +17,9 @@ public class WcPlayer {
     @Column(name = "player_name")
     private String playerName;
 
+    @Column(name = "short_name")
+    private String shortName; // e.g. "N. Al-Rashdan" — matches ESPN display format
+
     @Column(name = "team")
     private String team;
 
