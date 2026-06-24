@@ -6,14 +6,10 @@ import com.wc.prediction.wcprediction.repository.PlayerRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.regex.*;
@@ -23,7 +19,10 @@ import java.util.regex.*;
 public class EspnScraperService {
 
     private static final String ESPN_SCOREBOARD = "https://www.espn.com/soccer/scoreboard/_/league/fifa.world/date/";
-    private final HttpClient httpClient = HttpClient.newHttpClient();
+    private final WebClient webClient = WebClient.builder()
+            .defaultHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .codecs(c -> c.defaultCodecs().maxInMemorySize(10 * 1024 * 1024))
+            .build();
 
     @Autowired
     private PlayerRepository playerRepository;
@@ -39,13 +38,7 @@ public class EspnScraperService {
         log.info("Scraping ESPN: {}", url);
 
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    .GET()
-                    .build();
-
-            String html = httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
+            String html = webClient.get().uri(url).retrieve().bodyToMono(String.class).block();
             if (html == null || html.isEmpty()) {
                 log.warn("Empty response from ESPN for {}", url);
                 return null;
