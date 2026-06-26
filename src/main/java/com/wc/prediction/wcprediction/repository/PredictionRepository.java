@@ -18,6 +18,9 @@ public interface PredictionRepository extends JpaRepository<Prediction, Long> {
             "ORDER BY COALESCE(SUM(p.points), 0) DESC")
     List<Object[]> getLeaderboardByLocation(String location);
 
+    @Query("SELECT DISTINCT p.matchId FROM Prediction p")
+    List<String> findDistinctMatchIds();
+
     Optional<Prediction> findByUserAndMatchId(WcUser user, String matchId);
 
     Optional<List<Prediction>> findAllByMatchId(String matchId);

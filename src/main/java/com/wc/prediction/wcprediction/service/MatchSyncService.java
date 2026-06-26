@@ -53,6 +53,9 @@ public class MatchSyncService {
     @Autowired
     private PlayerRepository playerRepository;
 
+    @Autowired
+    private com.wc.prediction.wcprediction.repository.PredictionRepository predictionRepository;
+
     // ── Sync teams from GitHub ────────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")
@@ -62,7 +65,19 @@ public class MatchSyncService {
             if (json == null) return Map.of("error", "Could not fetch teams data");
             List<Map<String, Object>> teams = new ObjectMapper().readValue(json, List.class);
 
-            int created = 0, updated = 0;
+            // Team names used in predicted matches must not be renamed
+            Set<String> predictedMatchIds = new HashSet<>(predictionRepository.findDistinctMatchIds());
+            Set<String> protectedTeamNames = new HashSet<>();
+            if (!predictedMatchIds.isEmpty()) {
+                matchRepository.findAll().stream()
+                        .filter(m -> predictedMatchIds.contains(m.getMatchNo()))
+                        .forEach(m -> {
+                            if (m.getTeamA() != null) protectedTeamNames.add(m.getTeamA().toLowerCase());
+                            if (m.getTeamB() != null) protectedTeamNames.add(m.getTeamB().toLowerCase());
+                        });
+            }
+
+            int created = 0, updated = 0, skipped = 0;
             for (Map<String, Object> t : teams) {
                 String shortName = (String) t.get("fifa_code");
                 String teamName  = (String) t.get("name_en");
@@ -77,13 +92,20 @@ public class MatchSyncService {
                     teamRepository.save(team);
                     created++;
                 } else {
-                    existing.setTeamName(teamName);
+                    // Always safe to update logo; only rename if not in a predicted match
                     existing.setLogoUrl(logoUrl);
+                    if (!protectedTeamNames.contains(existing.getTeamName().toLowerCase())) {
+                        existing.setTeamName(teamName);
+                        updated++;
+                    } else {
+                        skipped++;
+                        log.info("Skipped renaming team '{}' — used in a predicted match", existing.getTeamName());
+                        updated++; // still counts as updated (logo may change)
+                    }
                     teamRepository.save(existing);
-                    updated++;
                 }
             }
-            log.info("Teams sync: created={}, updated={}", created, updated);
+            log.info("Teams sync: created={}, updated={}, nameSkipped={}", created, updated, skipped);
             return Map.of("created", created, "updated", updated, "total", created + updated);
         } catch (Exception e) {
             log.error("Teams sync failed: {}", e.getMessage());
@@ -204,90 +226,153 @@ public class MatchSyncService {
 
     public Map<String, Object> syncKnockoutMatches() {
         ObjectMapper mapper = new ObjectMapper();
+        java.time.format.DateTimeFormatter istFmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssxxx");
 
-        // Delete all existing knockout matches
-        List<WcMatch> knockoutMatches = matchRepository.findAll().stream()
+        // matchNos that must never be deleted or have their teams overwritten
+        Set<String> predictedMatchIds = new HashSet<>(predictionRepository.findDistinctMatchIds());
+
+        // Existing knockout matches indexed two ways
+        Map<String, WcMatch> existingByNo  = new HashMap<>();
+        Map<String, WcMatch> existingByDt  = new HashMap<>();  // key = IST datetime string
+        matchRepository.findAll().stream()
                 .filter(m -> m.getStage() != null && !m.getStage().equalsIgnoreCase("GROUP"))
-                .toList();
-        matchRepository.deleteAll(knockoutMatches);
-        log.info("Deleted {} existing knockout matches", knockoutMatches.size());
+                .forEach(m -> {
+                    existingByNo.put(m.getMatchNo(), m);
+                    if (m.getDateTime() != null) existingByDt.put(m.getDateTime(), m);
+                });
 
-        // Build team lookup by normalised name
+        // Build team lookup
         Map<String, WcTeam> nameToTeam = new HashMap<>();
         teamRepository.findAll().forEach(t -> nameToTeam.put(normalizeTeamName(t.getTeamName()), t));
 
-        int inserted = 0;
-        int skipped = 0;
-        int matchNo = 1;
+        // Fetch all ESPN events first
+        List<JsonNode> espnEvents = new ArrayList<>();
+        int dateErrors = 0;
         for (String date : KNOCKOUT_DATES) {
             try {
                 String json = webClient.get().uri(ESPN_SCOREBOARD + date)
                         .retrieve().bodyToMono(String.class).block();
                 if (json == null) continue;
+                for (JsonNode event : mapper.readTree(json).path("events"))
+                    espnEvents.add(event);
+            } catch (Exception e) {
+                log.error("Failed ESPN scoreboard for date {}: {}", date, e.getMessage());
+                dateErrors++;
+            }
+        }
 
-                JsonNode events = mapper.readTree(json).path("events");
-                for (JsonNode event : events) {
-                    JsonNode comp = event.path("competitions").path(0);
-                    String dateStr = comp.path("date").asText("");
-                    if (dateStr.isBlank()) continue;
+        int inserted = 0, updated = 0;
+        Set<String> processedMatchNos = new HashSet<>();
+        int nextMatchNo = 1;
 
-                    LocalDateTime matchTime;
-                    try {
-                        matchTime = OffsetDateTime.parse(dateStr)
-                                .atZoneSameInstant(IST)
-                                .toLocalDateTime();
-                    } catch (Exception e) {
-                        continue;
-                    }
+        for (JsonNode event : espnEvents) {
+            JsonNode comp = event.path("competitions").path(0);
+            String dateStr = comp.path("date").asText("");
+            if (dateStr.isBlank()) continue;
 
-                    String homeTeamName = null, awayTeamName = null;
-                    for (JsonNode competitor : comp.path("competitors")) {
-                        String tname = competitor.path("team").path("displayName").asText("");
-                        if (competitor.path("homeAway").asText().equals("home")) homeTeamName = tname;
-                        else awayTeamName = tname;
-                    }
-                    if (homeTeamName == null || awayTeamName == null) continue;
+            LocalDateTime matchTime;
+            try {
+                matchTime = OffsetDateTime.parse(dateStr).atZoneSameInstant(IST).toLocalDateTime();
+            } catch (Exception e) { continue; }
 
-                    WcTeam teamA = nameToTeam.get(normalizeTeamName(homeTeamName));
-                    WcTeam teamB = nameToTeam.get(normalizeTeamName(awayTeamName));
+            String homeTeamName = null, awayTeamName = null;
+            for (JsonNode competitor : comp.path("competitors")) {
+                String tname = competitor.path("team").path("displayName").asText("");
+                if (competitor.path("homeAway").asText().equals("home")) homeTeamName = tname;
+                else awayTeamName = tname;
+            }
+            if (homeTeamName == null || awayTeamName == null) continue;
 
-                    String espnNote = comp.path("notes").path(0).path("headline").asText("").toLowerCase();
-                    String stage = resolveStage(espnNote, matchTime);
-                    String venue = comp.path("venue").path("fullName").asText("TBD");
+            WcTeam teamA = nameToTeam.get(normalizeTeamName(homeTeamName));
+            WcTeam teamB = nameToTeam.get(normalizeTeamName(awayTeamName));
+            String espnNote = comp.path("notes").path(0).path("headline").asText("").toLowerCase();
+            String stage    = resolveStage(espnNote, matchTime, homeTeamName, awayTeamName);
+            String venue    = comp.path("venue").path("fullName").asText("TBD");
+            String teamAName = teamA != null ? teamA.getTeamName() : homeTeamName;
+            String teamBName = teamB != null ? teamB.getTeamName() : awayTeamName;
+            String dateTimeStr = matchTime.atZone(IST).format(istFmt);
 
-                    WcMatch match = new WcMatch();
-                    match.setTeamA(teamA != null ? teamA.getTeamName() : homeTeamName);
-                    match.setTeamB(teamB != null ? teamB.getTeamName() : awayTeamName);
-                    match.setDateTime(matchTime.atZone(IST).format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssxxx")));
+            // Try to find existing record by datetime (stable across re-syncs)
+            WcMatch match = existingByDt.get(dateTimeStr);
+
+            if (match != null) {
+                // Existing match — check if it has predictions
+                processedMatchNos.add(match.getMatchNo());
+                if (predictedMatchIds.contains(match.getMatchNo())) {
+                    // Preserve team names; only update schedule/venue/stage
+                    match.setDateTime(dateTimeStr);
                     match.setVenue(venue);
                     match.setStage(stage);
                     match.setGroupName(stage);
-                    match.setMatchNo(String.valueOf(matchNo++));
-                    matchRepository.save(match);
-                    log.info("Inserted {} match {}: {} vs {} at {}", stage, matchNo - 1, homeTeamName, awayTeamName, matchTime);
-                    inserted++;
+                    log.info("Safe-updated predicted match {}: time/venue/stage only", match.getMatchNo());
+                } else {
+                    // No predictions — full update
+                    match.setTeamA(teamAName);
+                    match.setTeamB(teamBName);
+                    match.setDateTime(dateTimeStr);
+                    match.setVenue(venue);
+                    match.setStage(stage);
+                    match.setGroupName(stage);
+                    log.info("Full-updated match {}: {} vs {}", match.getMatchNo(), teamAName, teamBName);
                 }
-            } catch (Exception e) {
-                log.error("Failed ESPN scoreboard for date {}: {}", date, e.getMessage());
-                skipped++;
+                matchRepository.save(match);
+                updated++;
+            } else {
+                // New match — assign next available matchNo (skip predicted slots)
+                while (predictedMatchIds.contains(String.valueOf(nextMatchNo))
+                        || processedMatchNos.contains(String.valueOf(nextMatchNo))) {
+                    nextMatchNo++;
+                }
+                String assignedNo = String.valueOf(nextMatchNo++);
+                WcMatch newMatch = new WcMatch();
+                newMatch.setMatchNo(assignedNo);
+                newMatch.setTeamA(teamAName);
+                newMatch.setTeamB(teamBName);
+                newMatch.setDateTime(dateTimeStr);
+                newMatch.setVenue(venue);
+                newMatch.setStage(stage);
+                newMatch.setGroupName(stage);
+                matchRepository.save(newMatch);
+                processedMatchNos.add(assignedNo);
+                log.info("Inserted {} match {}: {} vs {} at {}", stage, assignedNo, homeTeamName, awayTeamName, matchTime);
+                inserted++;
             }
         }
-        return Map.of("deleted", knockoutMatches.size(), "inserted", inserted, "dateErrors", skipped);
+
+        // Delete matches no longer in ESPN that have no predictions
+        List<WcMatch> toDelete = existingByNo.values().stream()
+                .filter(m -> !processedMatchNos.contains(m.getMatchNo())
+                          && !predictedMatchIds.contains(m.getMatchNo()))
+                .toList();
+        matchRepository.deleteAll(toDelete);
+        log.info("Cleanup: deleted {} stale matches", toDelete.size());
+
+        return Map.of("inserted", inserted, "updated", updated, "deleted", toDelete.size(),
+                "dateErrors", dateErrors, "predictedPreserved", predictedMatchIds.size());
     }
 
-    private String resolveStage(String note, LocalDateTime time) {
+    private String resolveStage(String note, LocalDateTime time, String homeTeam, String awayTeam) {
+        // ESPN headline is most reliable
         if (note.contains("round of 32") || note.contains("r32")) return "R32";
         if (note.contains("round of 16") || note.contains("r16")) return "R16";
         if (note.contains("quarterfinal") || note.contains("quarter-final")) return "QF";
         if (note.contains("semifinal") || note.contains("semi-final")) return "SF";
-        if (note.contains("third") || note.contains("3rd")) return "SF";
+        if (note.contains("third") || note.contains("3rd")) return "LF";
         if (note.contains("final")) return "FINAL";
-        // Fallback by date range
+        // Infer from TBD team name patterns (e.g. "Round of 32 1 Winner" → R16)
+        String teams = (homeTeam + " " + awayTeam).toLowerCase();
+        if (teams.contains("round of 32")) return "R16";
+        if (teams.contains("round of 16")) return "QF";
+        if (teams.contains("quarterfinal")) return "SF";
+        if (teams.contains("loser")) return "LF";
+        if (teams.contains("semifinal")) return "FINAL";
+        // Date-range fallback (last resort)
         LocalDate d = time.toLocalDate();
         if (!d.isBefore(LocalDate.of(2026, 6, 28)) && !d.isAfter(LocalDate.of(2026, 7, 4))) return "R32";
-        if (!d.isBefore(LocalDate.of(2026, 7, 5)) && !d.isAfter(LocalDate.of(2026, 7, 9))) return "R16";
+        if (!d.isBefore(LocalDate.of(2026, 7, 4)) && !d.isAfter(LocalDate.of(2026, 7, 9))) return "R16";
         if (!d.isBefore(LocalDate.of(2026, 7, 11)) && !d.isAfter(LocalDate.of(2026, 7, 13))) return "QF";
-        if (!d.isBefore(LocalDate.of(2026, 7, 15)) && !d.isAfter(LocalDate.of(2026, 7, 16))) return "SF";
+        if (!d.isBefore(LocalDate.of(2026, 7, 14)) && !d.isAfter(LocalDate.of(2026, 7, 16))) return "SF";
+        if (d.equals(LocalDate.of(2026, 7, 19))) return "LF";
         return "FINAL";
     }
 
