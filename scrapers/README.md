@@ -18,6 +18,8 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Local (writes directly to PostgreSQL)
+
 ```bash
 # Ensure PostgreSQL is running (docker compose up -d)
 python scrape_teams.py
@@ -26,3 +28,23 @@ python scrape_players.py
 ```
 
 Run teams first since matches reference team names.
+
+### Production (via API — no DB credentials needed)
+
+Set your admin `userId` in each `sync_*_api.py` file (`ADMIN_USER`), then run:
+
+```powershell
+cd C:\dev\wc-prediction\wc-prediction\scrapers
+
+python sync_teams_api.py
+python sync_matches_api.py
+python sync_players_api.py
+```
+
+| Script | Endpoint |
+|--------|----------|
+| `sync_teams_api.py` | `POST /api/teams/sync` |
+| `sync_matches_api.py` | `POST /api/matches/sync` |
+| `sync_players_api.py` | `POST /api/players/sync` |
+
+Run in order: teams → matches → players.

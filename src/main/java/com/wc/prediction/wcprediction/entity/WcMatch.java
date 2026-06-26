@@ -31,4 +31,7 @@ public class WcMatch {
 
     @Column(name = "venue")
     private String venue;
+
+    @Column(name = "stage")
+    private String stage;
 }

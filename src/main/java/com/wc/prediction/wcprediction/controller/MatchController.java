@@ -7,6 +7,7 @@ import com.wc.prediction.wcprediction.repository.MatchRepository;
 import com.wc.prediction.wcprediction.repository.MatchResultRepository;
 import com.wc.prediction.wcprediction.repository.TeamRepository;
 import com.wc.prediction.wcprediction.response.AdminResponse;
+import com.wc.prediction.wcprediction.service.MatchSyncService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -27,6 +28,9 @@ public class MatchController {
     @Autowired
     private MatchResultRepository matchResultRepository;
 
+    @Autowired
+    private MatchSyncService matchSyncService;
+
     @GetMapping
     public ResponseEntity<List<Map<String, Object>>> getAllMatches() {
         List<WcMatch> matches = matchRepository.findAllOrderByDateTime();
@@ -44,6 +48,7 @@ public class MatchController {
             map.put("teamBLogo", logoCache.getOrDefault(m.getTeamB(), ""));
             map.put("groupName", m.getGroupName());
             map.put("venue", m.getVenue());
+            map.put("stage", m.getStage());
             return map;
         }).collect(Collectors.toList());
 
@@ -87,5 +92,25 @@ public class MatchController {
             }
         }
         return ResponseEntity.ok(Map.of("created", created, "updated", updated, "total", matches.size()));
+    }
+
+    @GetMapping("/sync-knockout")
+    public ResponseEntity<Map<String, Object>> syncKnockoutMatches() {
+        return ResponseEntity.ok(matchSyncService.syncKnockoutMatches());
+    }
+
+    @GetMapping("/sync-teams")
+    public ResponseEntity<Map<String, Object>> syncTeams() {
+        return ResponseEntity.ok(matchSyncService.syncTeams());
+    }
+
+    @GetMapping("/sync-players")
+    public ResponseEntity<Map<String, Object>> syncPlayers() {
+        return ResponseEntity.ok(matchSyncService.syncPlayers());
+    }
+
+    @GetMapping("/sync-all")
+    public ResponseEntity<Map<String, Object>> syncAll() {
+        return ResponseEntity.ok(matchSyncService.syncAll());
     }
 }

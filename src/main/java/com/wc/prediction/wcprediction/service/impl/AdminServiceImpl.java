@@ -96,19 +96,19 @@ public class AdminServiceImpl implements AdminService {
     private int calculatePoints(Prediction prediction, MatchResult result) {
         int points = 0;
 
-        // Q1 — Who progresses: 3 pts
+        // Q1 — Who progresses: 5 pts
         if (prediction.getMatchResultPredicted().equals(result.getMatchResult())) {
-            points += 3;
+            points += 5;
         }
         // Q2 — Exact score after full time / extra time: 5 pts
         if (prediction.getScoreTeamAPredicted().equals(result.getScoreTeamA())
                 && prediction.getScoreTeamBPredicted().equals(result.getScoreTeamB())) {
             points += 5;
         }
-        // Q3 — Winning goalscorer: 5 pts
+        // Q3 — Winning goalscorer: 3 pts
         if (prediction.getWinningGoalscorerPredicted() != null
                 && prediction.getWinningGoalscorerPredicted().equals(result.getWinningGoalscorer())) {
-            points += 5;
+            points += 3;
         }
 
         return points;
