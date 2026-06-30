@@ -285,8 +285,10 @@ public class MatchSyncService {
 
             WcTeam teamA = nameToTeam.get(normalizeTeamName(homeTeamName));
             WcTeam teamB = nameToTeam.get(normalizeTeamName(awayTeamName));
-            String espnNote = comp.path("notes").path(0).path("headline").asText("").toLowerCase();
-            String stage    = resolveStage(espnNote, matchTime, homeTeamName, awayTeamName);
+            String espnNote     = comp.path("notes").path(0).path("headline").asText("").toLowerCase();
+            String seasonSlug   = event.path("season").path("slug").asText("").toLowerCase();
+            String altGameNote  = comp.path("altGameNote").asText("").toLowerCase();
+            String stage        = resolveStage(espnNote, seasonSlug, altGameNote, matchTime, homeTeamName, awayTeamName);
             String venue    = comp.path("venue").path("fullName").asText("TBD");
             String teamAName = teamA != null ? teamA.getTeamName() : homeTeamName;
             String teamBName = teamB != null ? teamB.getTeamName() : awayTeamName;
@@ -351,8 +353,22 @@ public class MatchSyncService {
                 "dateErrors", dateErrors, "predictedPreserved", predictedMatchIds.size());
     }
 
-    private String resolveStage(String note, LocalDateTime time, String homeTeam, String awayTeam) {
-        // ESPN headline is most reliable
+    private String resolveStage(String note, String seasonSlug, String altGameNote, LocalDateTime time, String homeTeam, String awayTeam) {
+        // season.slug is most reliable — always populated by ESPN
+        if (seasonSlug.contains("round-of-32") || seasonSlug.contains("r32")) return "R32";
+        if (seasonSlug.contains("round-of-16") || seasonSlug.contains("r16")) return "R16";
+        if (seasonSlug.contains("quarterfinal") || seasonSlug.contains("quarter-final")) return "QF";
+        if (seasonSlug.contains("semifinal") || seasonSlug.contains("semi-final")) return "SF";
+        if (seasonSlug.contains("third") || seasonSlug.contains("3rd") || seasonSlug.contains("third-place")) return "LF";
+        if (seasonSlug.contains("final")) return "FINAL";
+        // altGameNote fallback (e.g. "FIFA World Cup, Round of 16")
+        if (altGameNote.contains("round of 32")) return "R32";
+        if (altGameNote.contains("round of 16")) return "R16";
+        if (altGameNote.contains("quarterfinal") || altGameNote.contains("quarter-final")) return "QF";
+        if (altGameNote.contains("semifinal") || altGameNote.contains("semi-final")) return "SF";
+        if (altGameNote.contains("third") || altGameNote.contains("3rd")) return "LF";
+        if (altGameNote.contains("final")) return "FINAL";
+        // notes headline
         if (note.contains("round of 32") || note.contains("r32")) return "R32";
         if (note.contains("round of 16") || note.contains("r16")) return "R16";
         if (note.contains("quarterfinal") || note.contains("quarter-final")) return "QF";
@@ -366,9 +382,9 @@ public class MatchSyncService {
         if (teams.contains("quarterfinal")) return "SF";
         if (teams.contains("loser")) return "LF";
         if (teams.contains("semifinal")) return "FINAL";
-        // Date-range fallback (last resort)
+        // Date-range fallback (last resort — non-overlapping ranges)
         LocalDate d = time.toLocalDate();
-        if (!d.isBefore(LocalDate.of(2026, 6, 28)) && !d.isAfter(LocalDate.of(2026, 7, 4))) return "R32";
+        if (!d.isBefore(LocalDate.of(2026, 6, 28)) && !d.isAfter(LocalDate.of(2026, 7, 3))) return "R32";
         if (!d.isBefore(LocalDate.of(2026, 7, 4)) && !d.isAfter(LocalDate.of(2026, 7, 9))) return "R16";
         if (!d.isBefore(LocalDate.of(2026, 7, 11)) && !d.isAfter(LocalDate.of(2026, 7, 13))) return "QF";
         if (!d.isBefore(LocalDate.of(2026, 7, 14)) && !d.isAfter(LocalDate.of(2026, 7, 16))) return "SF";
