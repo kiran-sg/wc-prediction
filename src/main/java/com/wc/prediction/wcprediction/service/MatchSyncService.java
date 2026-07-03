@@ -6,10 +6,12 @@ import com.wc.prediction.wcprediction.entity.WcMatch;
 import com.wc.prediction.wcprediction.entity.WcPlayer;
 import com.wc.prediction.wcprediction.entity.WcTeam;
 import com.wc.prediction.wcprediction.repository.MatchRepository;
+import com.wc.prediction.wcprediction.repository.MatchResultRepository;
 import com.wc.prediction.wcprediction.repository.PlayerRepository;
 import com.wc.prediction.wcprediction.repository.TeamRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
@@ -55,6 +57,12 @@ public class MatchSyncService {
 
     @Autowired
     private com.wc.prediction.wcprediction.repository.PredictionRepository predictionRepository;
+
+    @Autowired
+    private MatchResultRepository matchResultRepository;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     // ── Sync teams from GitHub ────────────────────────────────────────────────
 
@@ -224,16 +232,40 @@ public class MatchSyncService {
         return Map.of("teams", teams, "matches", matches, "players", players);
     }
 
+    private void backupTablesBeforeSync() {
+        String[][] tables = {
+            {"wc_matches",       "wc_matches_backup"},
+            {"wc_predictions",   "wc_predictions_backup"},
+            {"wc_match_results", "wc_match_results_backup"}
+        };
+        for (String[] pair : tables) {
+            String src = pair[0], bak = pair[1];
+            try {
+                // Create backup table if it doesn't exist (preserves structure, no constraints)
+                jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS " + bak + " (LIKE " + src + ")");
+                // Refresh: truncate then reload from live table
+                jdbcTemplate.execute("TRUNCATE TABLE " + bak);
+                jdbcTemplate.execute("INSERT INTO " + bak + " SELECT * FROM " + src);
+                int count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + bak, Integer.class);
+                log.info("Backup {}: {} rows copied to {}", src, count, bak);
+            } catch (Exception e) {
+                log.error("Backup failed for {}: {}", src, e.getMessage());
+            }
+        }
+    }
+
     public Map<String, Object> syncKnockoutMatches() {
+        backupTablesBeforeSync();
+
         ObjectMapper mapper = new ObjectMapper();
         java.time.format.DateTimeFormatter istFmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssxxx");
 
-        // matchNos that must never be deleted or have their teams overwritten
+        // Match IDs referenced by predictions — these matches must never be deleted or have teams overwritten
         Set<String> predictedMatchIds = new HashSet<>(predictionRepository.findDistinctMatchIds());
 
-        // Existing knockout matches indexed two ways
-        Map<String, WcMatch> existingByNo  = new HashMap<>();
-        Map<String, WcMatch> existingByDt  = new HashMap<>();  // key = IST datetime string
+        // Index existing knockout matches by matchNo and datetime
+        Map<String, WcMatch> existingByNo = new HashMap<>();
+        Map<String, WcMatch> existingByDt = new HashMap<>();
         matchRepository.findAll().stream()
                 .filter(m -> m.getStage() != null && !m.getStage().equalsIgnoreCase("GROUP"))
                 .forEach(m -> {
@@ -241,11 +273,77 @@ public class MatchSyncService {
                     if (m.getDateTime() != null) existingByDt.put(m.getDateTime(), m);
                 });
 
+        // ── Phase 1: purge duplicate rows for the same real team pair ─────────
+        // Keep whichever row is already referenced by predictions/results (or lowest matchNo).
+        int deduped = 0;
+        Map<String, List<WcMatch>> byTeamPair = new HashMap<>();
+        for (WcMatch m : existingByNo.values()) {
+            String a = m.getTeamA(), b = m.getTeamB();
+            if (a == null || b == null) continue;
+            String al = a.toLowerCase(), bl = b.toLowerCase();
+            // Skip TBD placeholder names — those slots legitimately share "team" text
+            if (al.contains("winner") || al.contains("loser") || bl.contains("winner") || bl.contains("loser")
+                    || al.contains("round of") || bl.contains("round of")
+                    || al.contains("semifinal") || bl.contains("semifinal")
+                    || al.contains("quarterfinal") || bl.contains("quarterfinal")) continue;
+            String key = normalizeTeamName(a) + "|" + normalizeTeamName(b);
+            byTeamPair.computeIfAbsent(key, k -> new ArrayList<>()).add(m);
+        }
+        // Pre-build a set of match IDs that have a result entry
+        Set<String> resultMatchIds = new HashSet<>();
+        matchResultRepository.findAll().forEach(r -> resultMatchIds.add(r.getMatchId()));
+
+        for (List<WcMatch> dupes : byTeamPair.values()) {
+            if (dupes.size() <= 1) continue;
+            // Prefer the row referenced by predictions; otherwise keep the lowest matchNo
+            WcMatch keeper = dupes.stream()
+                    .filter(m -> predictedMatchIds.contains(m.getMatchNo()))
+                    .findFirst()
+                    .orElseGet(() -> dupes.stream()
+                            .min(Comparator.comparingInt(m -> {
+                                try { return Integer.parseInt(m.getMatchNo()); }
+                                catch (Exception e) { return Integer.MAX_VALUE; }
+                            })).orElseThrow());
+            boolean keeperHasResult = resultMatchIds.contains(keeper.getMatchNo());
+            for (WcMatch dupe : dupes) {
+                if (dupe.getMatchNo().equals(keeper.getMatchNo())) continue;
+                boolean dupeHasPredictions = predictedMatchIds.contains(dupe.getMatchNo());
+                boolean dupeHasResult = resultMatchIds.contains(dupe.getMatchNo());
+                if (dupeHasPredictions) {
+                    // Never delete a match that has predictions on it
+                    log.warn("Cannot remove duplicate match {} ({} vs {}) — it has predictions; manual cleanup needed", dupe.getMatchNo(), dupe.getTeamA(), dupe.getTeamB());
+                } else if (dupeHasResult && !keeperHasResult) {
+                    // Dupe holds the only result — unsafe to delete, keeper would lose result data
+                    log.warn("Cannot remove duplicate match {} ({} vs {}) — it holds the sole result and keeper {} has none; manual cleanup needed", dupe.getMatchNo(), dupe.getTeamA(), dupe.getTeamB(), keeper.getMatchNo());
+                } else {
+                    // Safe to delete: no predictions, and if it has a result the keeper has one too
+                    if (dupeHasResult) {
+                        matchResultRepository.findByMatchId(dupe.getMatchNo()).ifPresent(r -> {
+                            matchResultRepository.delete(r);
+                            log.info("Deleted redundant result for duplicate match {}", dupe.getMatchNo());
+                        });
+                    }
+                    existingByNo.remove(dupe.getMatchNo());
+                    if (dupe.getDateTime() != null) existingByDt.remove(dupe.getDateTime());
+                    matchRepository.delete(dupe);
+                    deduped++;
+                    log.info("Removed duplicate match {} ({} vs {}), kept matchNo {}", dupe.getMatchNo(), dupe.getTeamA(), dupe.getTeamB(), keeper.getMatchNo());
+                }
+            }
+        }
+
         // Build team lookup
         Map<String, WcTeam> nameToTeam = new HashMap<>();
         teamRepository.findAll().forEach(t -> nameToTeam.put(normalizeTeamName(t.getTeamName()), t));
 
-        // Fetch all ESPN events first
+        // Team-pair fallback index: catches matches whose kickoff time shifted in ESPN
+        Map<String, WcMatch> existingByTeamPair = new HashMap<>();
+        existingByNo.values().forEach(m -> {
+            if (m.getTeamA() != null && m.getTeamB() != null)
+                existingByTeamPair.put(normalizeTeamName(m.getTeamA()) + "|" + normalizeTeamName(m.getTeamB()), m);
+        });
+
+        // Fetch all ESPN events
         List<JsonNode> espnEvents = new ArrayList<>();
         int dateErrors = 0;
         for (String date : KNOCKOUT_DATES) {
@@ -285,30 +383,32 @@ public class MatchSyncService {
 
             WcTeam teamA = nameToTeam.get(normalizeTeamName(homeTeamName));
             WcTeam teamB = nameToTeam.get(normalizeTeamName(awayTeamName));
-            String espnNote     = comp.path("notes").path(0).path("headline").asText("").toLowerCase();
-            String seasonSlug   = event.path("season").path("slug").asText("").toLowerCase();
-            String altGameNote  = comp.path("altGameNote").asText("").toLowerCase();
-            String stage        = resolveStage(espnNote, seasonSlug, altGameNote, matchTime, homeTeamName, awayTeamName);
-            String venue    = comp.path("venue").path("fullName").asText("TBD");
-            String teamAName = teamA != null ? teamA.getTeamName() : homeTeamName;
-            String teamBName = teamB != null ? teamB.getTeamName() : awayTeamName;
+            String espnNote    = comp.path("notes").path(0).path("headline").asText("").toLowerCase();
+            String seasonSlug  = event.path("season").path("slug").asText("").toLowerCase();
+            String altGameNote = comp.path("altGameNote").asText("").toLowerCase();
+            String stage       = resolveStage(espnNote, seasonSlug, altGameNote, matchTime, homeTeamName, awayTeamName);
+            String venue       = comp.path("venue").path("fullName").asText("TBD");
+            String teamAName   = teamA != null ? teamA.getTeamName() : homeTeamName;
+            String teamBName   = teamB != null ? teamB.getTeamName() : awayTeamName;
             String dateTimeStr = matchTime.atZone(IST).format(istFmt);
 
-            // Try to find existing record by datetime (stable across re-syncs)
+            // Lookup by datetime first; fall back to team pair (handles ESPN time shifts)
             WcMatch match = existingByDt.get(dateTimeStr);
+            if (match == null) {
+                String pairKey = normalizeTeamName(teamAName) + "|" + normalizeTeamName(teamBName);
+                match = existingByTeamPair.get(pairKey);
+            }
 
             if (match != null) {
                 // Existing match — check if it has predictions
                 processedMatchNos.add(match.getMatchNo());
                 if (predictedMatchIds.contains(match.getMatchNo())) {
-                    // Preserve team names; only update schedule/venue/stage
                     match.setDateTime(dateTimeStr);
                     match.setVenue(venue);
                     match.setStage(stage);
                     match.setGroupName(stage);
                     log.info("Safe-updated predicted match {}: time/venue/stage only", match.getMatchNo());
                 } else {
-                    // No predictions — full update
                     match.setTeamA(teamAName);
                     match.setTeamB(teamBName);
                     match.setDateTime(dateTimeStr);
@@ -320,7 +420,6 @@ public class MatchSyncService {
                 matchRepository.save(match);
                 updated++;
             } else {
-                // New match — assign next available matchNo (skip predicted slots)
                 while (predictedMatchIds.contains(String.valueOf(nextMatchNo))
                         || processedMatchNos.contains(String.valueOf(nextMatchNo))) {
                     nextMatchNo++;
@@ -341,15 +440,16 @@ public class MatchSyncService {
             }
         }
 
-        // Delete matches no longer in ESPN that have no predictions
+        // Delete stale matches no longer in ESPN feed (only if no predictions on them)
         List<WcMatch> toDelete = existingByNo.values().stream()
                 .filter(m -> !processedMatchNos.contains(m.getMatchNo())
                           && !predictedMatchIds.contains(m.getMatchNo()))
                 .toList();
         matchRepository.deleteAll(toDelete);
-        log.info("Cleanup: deleted {} stale matches", toDelete.size());
+        log.info("Cleanup: deleted {} stale matches, removed {} duplicates", toDelete.size(), deduped);
 
-        return Map.of("inserted", inserted, "updated", updated, "deleted", toDelete.size(),
+        return Map.of("inserted", inserted, "updated", updated,
+                "deleted", toDelete.size(), "deduped", deduped,
                 "dateErrors", dateErrors, "predictedPreserved", predictedMatchIds.size());
     }
 
