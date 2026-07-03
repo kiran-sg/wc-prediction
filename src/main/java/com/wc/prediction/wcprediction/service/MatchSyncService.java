@@ -273,9 +273,38 @@ public class MatchSyncService {
                     if (m.getDateTime() != null) existingByDt.put(m.getDateTime(), m);
                 });
 
+        // ── Fetch ESPN events once — used for both dedup and main sync ───────
+        List<JsonNode> espnEvents = new ArrayList<>();
+        Set<String> espnDatetimes = new HashSet<>();
+        int dateErrors = 0;
+        for (String date : KNOCKOUT_DATES) {
+            try {
+                String json = webClient.get().uri(ESPN_SCOREBOARD + date)
+                        .retrieve().bodyToMono(String.class).block();
+                if (json == null) continue;
+                for (JsonNode event : mapper.readTree(json).path("events")) {
+                    espnEvents.add(event);
+                    String ds = event.path("competitions").path(0).path("date").asText("");
+                    if (!ds.isBlank()) {
+                        try {
+                            espnDatetimes.add(OffsetDateTime.parse(ds).atZoneSameInstant(IST).toLocalDateTime().atZone(IST).format(istFmt));
+                        } catch (Exception ignored) {}
+                    }
+                }
+            } catch (Exception e) {
+                log.error("Failed ESPN scoreboard for date {}: {}", date, e.getMessage());
+                dateErrors++;
+            }
+        }
+
         // ── Phase 1: purge duplicate rows for the same real team pair ─────────
-        // Keep whichever row is already referenced by predictions/results (or lowest matchNo).
+        // Strategy: pick a keeper, re-point all predictions + results from dupes to keeper, delete dupes.
         int deduped = 0;
+
+        // Pre-build a set of match IDs that have a result entry
+        Set<String> resultMatchIds = new HashSet<>();
+        matchResultRepository.findAll().forEach(r -> resultMatchIds.add(r.getMatchId()));
+
         Map<String, List<WcMatch>> byTeamPair = new HashMap<>();
         for (WcMatch m : existingByNo.values()) {
             String a = m.getTeamA(), b = m.getTeamB();
@@ -289,46 +318,66 @@ public class MatchSyncService {
             String key = normalizeTeamName(a) + "|" + normalizeTeamName(b);
             byTeamPair.computeIfAbsent(key, k -> new ArrayList<>()).add(m);
         }
-        // Pre-build a set of match IDs that have a result entry
-        Set<String> resultMatchIds = new HashSet<>();
-        matchResultRepository.findAll().forEach(r -> resultMatchIds.add(r.getMatchId()));
 
         for (List<WcMatch> dupes : byTeamPair.values()) {
             if (dupes.size() <= 1) continue;
-            // Prefer the row referenced by predictions; otherwise keep the lowest matchNo
+
+            // Keeper priority: (1) has predictions, (2) datetime matches ESPN, (3) lowest matchNo
             WcMatch keeper = dupes.stream()
                     .filter(m -> predictedMatchIds.contains(m.getMatchNo()))
                     .findFirst()
                     .orElseGet(() -> dupes.stream()
-                            .min(Comparator.comparingInt(m -> {
-                                try { return Integer.parseInt(m.getMatchNo()); }
-                                catch (Exception e) { return Integer.MAX_VALUE; }
-                            })).orElseThrow());
-            boolean keeperHasResult = resultMatchIds.contains(keeper.getMatchNo());
+                            .filter(m -> m.getDateTime() != null && espnDatetimes.contains(m.getDateTime()))
+                            .findFirst()
+                            .orElseGet(() -> dupes.stream()
+                                    .min(Comparator.comparingInt(m -> {
+                                        try { return Integer.parseInt(m.getMatchNo()); }
+                                        catch (Exception e) { return Integer.MAX_VALUE; }
+                                    })).orElseThrow()));
+
+            log.info("Dedup: keeper matchNo={} ({} vs {}), processing {} duplicate(s)",
+                    keeper.getMatchNo(), keeper.getTeamA(), keeper.getTeamB(), dupes.size() - 1);
+
             for (WcMatch dupe : dupes) {
                 if (dupe.getMatchNo().equals(keeper.getMatchNo())) continue;
-                boolean dupeHasPredictions = predictedMatchIds.contains(dupe.getMatchNo());
-                boolean dupeHasResult = resultMatchIds.contains(dupe.getMatchNo());
-                if (dupeHasPredictions) {
-                    // Never delete a match that has predictions on it
-                    log.warn("Cannot remove duplicate match {} ({} vs {}) — it has predictions; manual cleanup needed", dupe.getMatchNo(), dupe.getTeamA(), dupe.getTeamB());
-                } else if (dupeHasResult && !keeperHasResult) {
-                    // Dupe holds the only result — unsafe to delete, keeper would lose result data
-                    log.warn("Cannot remove duplicate match {} ({} vs {}) — it holds the sole result and keeper {} has none; manual cleanup needed", dupe.getMatchNo(), dupe.getTeamA(), dupe.getTeamB(), keeper.getMatchNo());
-                } else {
-                    // Safe to delete: no predictions, and if it has a result the keeper has one too
-                    if (dupeHasResult) {
-                        matchResultRepository.findByMatchId(dupe.getMatchNo()).ifPresent(r -> {
-                            matchResultRepository.delete(r);
-                            log.info("Deleted redundant result for duplicate match {}", dupe.getMatchNo());
-                        });
+
+                // Re-point predictions from dupe to keeper (avoids orphaning user predictions)
+                predictionRepository.findAllByMatchId(dupe.getMatchNo()).ifPresent(preds -> {
+                    for (Prediction p : preds) {
+                        // Only migrate if keeper doesn't already have a prediction from the same user
+                        boolean alreadyExists = predictionRepository
+                                .findByUserAndMatchId(p.getUser(), keeper.getMatchNo()).isPresent();
+                        if (!alreadyExists) {
+                            p.setMatchId(keeper.getMatchNo());
+                            predictionRepository.save(p);
+                            log.info("Re-pointed prediction {} from matchNo {} to {}", p.getPredictionId(), dupe.getMatchNo(), keeper.getMatchNo());
+                        } else {
+                            predictionRepository.delete(p);
+                            log.info("Deleted duplicate prediction {} (user already has one on keeper {})", p.getPredictionId(), keeper.getMatchNo());
+                        }
                     }
-                    existingByNo.remove(dupe.getMatchNo());
-                    if (dupe.getDateTime() != null) existingByDt.remove(dupe.getDateTime());
-                    matchRepository.delete(dupe);
-                    deduped++;
-                    log.info("Removed duplicate match {} ({} vs {}), kept matchNo {}", dupe.getMatchNo(), dupe.getTeamA(), dupe.getTeamB(), keeper.getMatchNo());
+                });
+
+                // Re-point result from dupe to keeper if keeper has no result yet
+                if (resultMatchIds.contains(dupe.getMatchNo())) {
+                    matchResultRepository.findByMatchId(dupe.getMatchNo()).ifPresent(r -> {
+                        if (!resultMatchIds.contains(keeper.getMatchNo())) {
+                            r.setMatchId(keeper.getMatchNo());
+                            matchResultRepository.save(r);
+                            log.info("Re-pointed result from matchNo {} to {}", dupe.getMatchNo(), keeper.getMatchNo());
+                        } else {
+                            matchResultRepository.delete(r);
+                            log.info("Deleted redundant result for duplicate matchNo {}", dupe.getMatchNo());
+                        }
+                    });
                 }
+
+                existingByNo.remove(dupe.getMatchNo());
+                if (dupe.getDateTime() != null) existingByDt.remove(dupe.getDateTime());
+                matchRepository.delete(dupe);
+                deduped++;
+                log.info("Deleted duplicate matchNo {} ({} vs {}), kept matchNo {}",
+                        dupe.getMatchNo(), dupe.getTeamA(), dupe.getTeamB(), keeper.getMatchNo());
             }
         }
 
@@ -342,22 +391,6 @@ public class MatchSyncService {
             if (m.getTeamA() != null && m.getTeamB() != null)
                 existingByTeamPair.put(normalizeTeamName(m.getTeamA()) + "|" + normalizeTeamName(m.getTeamB()), m);
         });
-
-        // Fetch all ESPN events
-        List<JsonNode> espnEvents = new ArrayList<>();
-        int dateErrors = 0;
-        for (String date : KNOCKOUT_DATES) {
-            try {
-                String json = webClient.get().uri(ESPN_SCOREBOARD + date)
-                        .retrieve().bodyToMono(String.class).block();
-                if (json == null) continue;
-                for (JsonNode event : mapper.readTree(json).path("events"))
-                    espnEvents.add(event);
-            } catch (Exception e) {
-                log.error("Failed ESPN scoreboard for date {}: {}", date, e.getMessage());
-                dateErrors++;
-            }
-        }
 
         int inserted = 0, updated = 0;
         Set<String> processedMatchNos = new HashSet<>();
@@ -400,7 +433,6 @@ public class MatchSyncService {
             }
 
             if (match != null) {
-                // Existing match — check if it has predictions
                 processedMatchNos.add(match.getMatchNo());
                 if (predictedMatchIds.contains(match.getMatchNo())) {
                     match.setDateTime(dateTimeStr);
