@@ -2,6 +2,8 @@ package com.wc.prediction.wcprediction.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.wc.prediction.wcprediction.entity.MatchResult;
+import com.wc.prediction.wcprediction.entity.Prediction;
 import com.wc.prediction.wcprediction.entity.WcMatch;
 import com.wc.prediction.wcprediction.entity.WcPlayer;
 import com.wc.prediction.wcprediction.entity.WcTeam;
