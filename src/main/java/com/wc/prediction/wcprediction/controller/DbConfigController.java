@@ -1,5 +1,6 @@
 package com.wc.prediction.wcprediction.controller;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -7,6 +8,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/superadmin/db")
 public class DbConfigController {
@@ -51,32 +53,42 @@ public class DbConfigController {
 
     @PatchMapping("/table/{name}/{id}")
     public ResponseEntity<?> updateRow(@PathVariable String name,
-                                       @PathVariable String id,
+                                       @PathVariable Long id,
                                        @RequestBody Map<String, Object> fields) {
         if (!isAllowed(name)) return ResponseEntity.badRequest().body(Map.of("error", "Table not allowed"));
         if (fields.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "No fields to update"));
-        String pk = pkFor(name);
-        StringBuilder sql = new StringBuilder("UPDATE " + name + " SET ");
-        List<Object> params = new ArrayList<>();
-        fields.forEach((col, val) -> {
-            if (!col.equals(pk)) {
-                if (!params.isEmpty()) sql.append(", ");
-                sql.append(col).append(" = ?");
-                params.add(val);
-            }
-        });
-        sql.append(" WHERE ").append(pk).append(" = ?");
-        params.add(id);
-        int updated = jdbcTemplate.update(sql.toString(), params.toArray());
-        return ResponseEntity.ok(Map.of("updated", updated));
+        try {
+            String pk = pkFor(name);
+            StringBuilder sql = new StringBuilder("UPDATE " + name + " SET ");
+            List<Object> params = new ArrayList<>();
+            fields.forEach((col, val) -> {
+                if (!col.equals(pk)) {
+                    if (!params.isEmpty()) sql.append(", ");
+                    sql.append(col).append(" = ?");
+                    params.add(val);
+                }
+            });
+            sql.append(" WHERE ").append(pk).append(" = ?");
+            params.add(id);
+            int updated = jdbcTemplate.update(sql.toString(), params.toArray());
+            return ResponseEntity.ok(Map.of("updated", updated));
+        } catch (Exception e) {
+            log.error("DB update failed for {}/{}: {}", name, id, e.getMessage());
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
     }
 
     @DeleteMapping("/table/{name}/{id}")
-    public ResponseEntity<?> deleteRow(@PathVariable String name, @PathVariable String id) {
+    public ResponseEntity<?> deleteRow(@PathVariable String name, @PathVariable Long id) {
         if (!isAllowed(name)) return ResponseEntity.badRequest().body(Map.of("error", "Table not allowed"));
-        String pk = pkFor(name);
-        int deleted = jdbcTemplate.update("DELETE FROM " + name + " WHERE " + pk + " = ?", id);
-        return ResponseEntity.ok(Map.of("deleted", deleted));
+        try {
+            String pk = pkFor(name);
+            int deleted = jdbcTemplate.update("DELETE FROM " + name + " WHERE " + pk + " = ?", id);
+            return ResponseEntity.ok(Map.of("deleted", deleted));
+        } catch (Exception e) {
+            log.error("DB delete failed for {}/{}: {}", name, id, e.getMessage());
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
     }
 
     private boolean isAllowed(String name) {
