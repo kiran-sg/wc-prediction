@@ -12,4 +12,5 @@ public class WcUserDto {
     private String location;
     private String pwd;
     private Boolean isAdmin;
+    private Boolean isSuperAdmin;
 }

@@ -11,10 +11,15 @@ public class WebConfig implements WebMvcConfigurer {
     @Autowired
     private AdminInterceptor adminInterceptor;
 
+    @Autowired
+    private SuperAdminInterceptor superAdminInterceptor;
+
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(adminInterceptor)
                 .addPathPatterns("/api/admin/**", "/api/users", "/api/users/**", "/api/matches/sync-*")
                 .excludePathPatterns("/api/users/validate");
+        registry.addInterceptor(superAdminInterceptor)
+                .addPathPatterns("/api/superadmin/**");
     }
 }

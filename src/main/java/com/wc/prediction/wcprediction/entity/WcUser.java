@@ -23,4 +23,7 @@ public class WcUser {
 
     @Column(name = "is_admin")
     private Boolean isAdmin = false;
+
+    @Column(name = "is_super_admin")
+    private Boolean isSuperAdmin = false;
 }

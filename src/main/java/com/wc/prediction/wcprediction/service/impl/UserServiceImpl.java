@@ -34,11 +34,16 @@ public class UserServiceImpl implements UserService {
         boolean validUser = user != null && user.getUserId().equals(userId);
         response.setValidUser(validUser);
         if (validUser) {
+            if ("superadmin".equals(user.getUserId()) && !Boolean.TRUE.equals(user.getIsSuperAdmin())) {
+                user.setIsSuperAdmin(true);
+                userRepository.save(user);
+            }
             WcUserDto dto = new WcUserDto();
             dto.setUserId(user.getUserId());
             dto.setName(user.getName());
             dto.setLocation(user.getLocation());
             dto.setIsAdmin(user.getIsAdmin());
+            dto.setIsSuperAdmin(user.getIsSuperAdmin());
             response.setUser(dto);
         }
         return response;
