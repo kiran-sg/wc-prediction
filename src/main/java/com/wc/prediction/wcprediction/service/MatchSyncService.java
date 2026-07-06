@@ -36,8 +36,8 @@ public class MatchSyncService {
     // All dates covering R32 through Final
     private static final List<String> KNOCKOUT_DATES = List.of(
         "20260628","20260629","20260630","20260701","20260702","20260703","20260704",
-        "20260705","20260706","20260707","20260708","20260709",
-        "20260711","20260712","20260713",
+        "20260705","20260706","20260707","20260708","20260709","20260710",
+        "20260711","20260712","20260713","20260714",
         "20260715","20260716",
         "20260718","20260719"
     );
@@ -455,7 +455,8 @@ public class MatchSyncService {
                 updated++;
             } else {
                 while (predictedMatchIds.contains(String.valueOf(nextMatchNo))
-                        || processedMatchNos.contains(String.valueOf(nextMatchNo))) {
+                        || processedMatchNos.contains(String.valueOf(nextMatchNo))
+                        || existingByNo.containsKey(String.valueOf(nextMatchNo))) {
                     nextMatchNo++;
                 }
                 String assignedNo = String.valueOf(nextMatchNo++);
