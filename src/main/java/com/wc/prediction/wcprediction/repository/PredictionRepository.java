@@ -10,12 +10,13 @@ import java.util.Optional;
 
 public interface PredictionRepository extends JpaRepository<Prediction, Long> {
 
-    @Query("SELECT u, COALESCE(SUM(p.points), 0) as totalPoints " +
+    @Query("SELECT u, COALESCE(SUM(p.points), 0) + COALESCE(MAX(tp.totalPoints), 0) as totalPoints " +
             "FROM WcUser u " +
             "LEFT JOIN Prediction p ON u.id = p.user.id " +
+            "LEFT JOIN TournamentPrediction tp ON u.id = tp.user.id " +
             "WHERE u.location = ?1 " +
             "GROUP BY u.id " +
-            "ORDER BY COALESCE(SUM(p.points), 0) DESC")
+            "ORDER BY (COALESCE(SUM(p.points), 0) + COALESCE(MAX(tp.totalPoints), 0)) DESC")
     List<Object[]> getLeaderboardByLocation(String location);
 
     @Query("SELECT DISTINCT p.matchId FROM Prediction p")

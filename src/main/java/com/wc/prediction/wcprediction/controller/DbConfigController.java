@@ -14,9 +14,9 @@ import java.util.*;
 public class DbConfigController {
 
     private static final List<Map<String, Object>> TABLE_META = List.of(
-        Map.of("name", "wc_matches",  "label", "Matches",  "pk", "id"),
-        Map.of("name", "wc_teams",    "label", "Teams",    "pk", "id"),
-        Map.of("name", "wc_players",  "label", "Players",  "pk", "id")
+        Map.of("name", "wc_matches", "label", "Matches", "pk", "id"),
+        Map.of("name", "wc_teams",   "label", "Teams",   "pk", "id"),
+        Map.of("name", "wc_players", "label", "Players", "pk", "id")
     );
 
     @Autowired

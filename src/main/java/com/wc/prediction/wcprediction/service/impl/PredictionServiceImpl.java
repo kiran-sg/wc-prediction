@@ -120,9 +120,9 @@ public class PredictionServiceImpl implements PredictionService {
         for (int i = 0; i < results.size(); i++) {
             Object[] result = results.get(i);
             WcUser user = (WcUser) result[0];
-            int totalPoints = ((Long) result[1]).intValue();
+            int totalPoints = ((Number) result[1]).intValue();
 
-            if (i > 0 && totalPoints != ((Long) results.get(i - 1)[1]).intValue()) {
+            if (i > 0 && totalPoints != ((Number) results.get(i - 1)[1]).intValue()) {
                 rank = position;
             }
 
