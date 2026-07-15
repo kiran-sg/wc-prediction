@@ -93,6 +93,23 @@ public class AdminController {
         return ResponseEntity.ok(response);
     }
 
+    @PatchMapping("/users/{userId}/missed-points")
+    public ResponseEntity<Map<String, Object>> updateMissedPoints(
+            @PathVariable String userId,
+            @RequestBody Map<String, Integer> body) {
+        WcUser user = userRepository.findByUserId(userId);
+        if (user == null) {
+            return ResponseEntity.badRequest().body(Map.of("status", "error", "message", "User not found: " + userId));
+        }
+        Integer points = body.get("missedPoints");
+        if (points == null || points < 0) {
+            return ResponseEntity.badRequest().body(Map.of("status", "error", "message", "Invalid missedPoints value"));
+        }
+        user.setMissedPoints(points);
+        userRepository.save(user);
+        return ResponseEntity.ok(Map.of("status", "ok", "userId", userId, "missedPoints", points));
+    }
+
     // POST /api/admin/users/upload — Excel with columns: Name, Location, Hash ID
     @PostMapping("/users/upload")
     public ResponseEntity<Map<String, Object>> uploadUsers(@RequestParam("file") MultipartFile file) {

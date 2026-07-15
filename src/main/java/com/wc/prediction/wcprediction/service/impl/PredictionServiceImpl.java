@@ -132,7 +132,7 @@ public class PredictionServiceImpl implements PredictionService {
         }
 
         return leaderboard.stream()
-                .filter(d -> d.getTotalPoints() != 0)
+                .filter(d -> d.getTotalPoints() > 0)
                 .toList();
     }
 }

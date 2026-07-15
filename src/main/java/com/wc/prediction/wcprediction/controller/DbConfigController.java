@@ -14,6 +14,7 @@ import java.util.*;
 public class DbConfigController {
 
     private static final List<Map<String, Object>> TABLE_META = List.of(
+        Map.of("name", "wc_users",   "label", "Users",   "pk", "id"),
         Map.of("name", "wc_matches", "label", "Matches", "pk", "id"),
         Map.of("name", "wc_teams",   "label", "Teams",   "pk", "id"),
         Map.of("name", "wc_players", "label", "Players", "pk", "id")
@@ -105,6 +106,7 @@ public class DbConfigController {
     private String buildSearch(String table, String q) {
         String escaped = q.replace("'", "''");
         Map<String, String[]> searchCols = Map.of(
+            "wc_users",   new String[]{"name", "user_id", "location"},
             "wc_matches", new String[]{"team_a", "team_b", "venue", "stage", "match_no"},
             "wc_teams",   new String[]{"team_name", "short_name"},
             "wc_players", new String[]{"player_name", "team", "position"}

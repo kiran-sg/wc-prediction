@@ -26,4 +26,7 @@ public class WcUser {
 
     @Column(name = "is_super_admin")
     private Boolean isSuperAdmin = false;
+
+    @Column(name = "missed_points", nullable = false, columnDefinition = "integer default 0")
+    private Integer missedPoints = 0;
 }
